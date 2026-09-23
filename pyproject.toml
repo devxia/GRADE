@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grade"
+dynamic = ["version"]
+description = "GPCR-targeted Ranking-guided Agonist Design Engine"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Xia Binbin"}]
+dependencies = [
+    "torch==2.4.0",
+    "transformers==4.44.0",
+    "tqdm",
+    "safetensors",
+]
+
+[project.urls]
+Repository = "https://github.com/devxia/GRADE"
+
+[project.scripts]
+grade-inference = "grade.inference:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "grade.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["grade*"]
+
+[tool.setuptools.package-data]
+grade = ["targets/*.fa"]

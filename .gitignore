@@ -1,0 +1,25 @@
+# Python
+.venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Local inference and validation outputs
+result/
+/*.checkpoint_rank*.json
+/*.checkpoint_rank*.tmp
+/*_rank*.csv
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Local tests
+tests/

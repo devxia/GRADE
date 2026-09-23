@@ -87,7 +87,7 @@ python skills/grade-cloud/scripts/grade_predict.py --help
 
 ### Installation
 
-Use Python 3.11 on a platform supported by PyTorch 2.4.0. A CUDA-enabled GPU is recommended for larger screens; CPU inference is also supported. The installation pins PyTorch 2.4.0 and Transformers 4.44.0. Official PyTorch 2.4.0 wheels do not support Intel macOS; use a supported machine or the Cloud API in that case.
+For local inference on Linux, use Python 3.11. A CUDA-enabled GPU is recommended for larger screens; CPU inference is also supported. The installation pins PyTorch 2.4.0 and Transformers 4.44.0.
 
 From the GRADE source directory:
 

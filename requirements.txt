@@ -1,3 +1,5 @@
+# Full local inference environment. Cloud-only users should install the base package.
+requests>=2.31,<3
 torch==2.4.0
 transformers==4.44.0
 tqdm

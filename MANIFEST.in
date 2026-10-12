@@ -1,0 +1,8 @@
+include build_support.py
+include DEVELOPMENT.md
+include requirements.txt
+include run_inference.py
+include scripts/sync_cloud_skill.py
+include skills/grade-cloud/SKILL.md
+include skills/grade-cloud/scripts/grade_predict.py
+recursive-include tests *.py

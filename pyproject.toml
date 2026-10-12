@@ -3,15 +3,18 @@ requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "grade"
+name = "grade-client"
 dynamic = ["version"]
-description = "GPCR-targeted Ranking-guided Agonist Design Engine"
+description = "GRADE: GPCR-peptide ranking with Cloud and optional local inference"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{name = "Xia Binbin"}]
-dependencies = [
+dependencies = ["requests>=2.31,<3"]
+
+[project.optional-dependencies]
+local = [
     "torch==2.4.0",
     "transformers==4.44.0",
     "tqdm",
@@ -22,7 +25,12 @@ dependencies = [
 Repository = "https://github.com/devxia/GRADE"
 
 [project.scripts]
+grade = "grade.inference:main"
 grade-inference = "grade.inference:main"
+
+[tool.setuptools.cmdclass]
+build_py = "build_support.CheckedBuildPy"
+sdist = "build_support.CheckedSdist"
 
 [tool.setuptools.dynamic]
 version = {attr = "grade.__version__"}

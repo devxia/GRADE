@@ -20,6 +20,3 @@ result/
 # IDE
 .vscode/
 .idea/
-
-# Local tests
-tests/

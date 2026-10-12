@@ -41,7 +41,7 @@ class ResultWriter(ABC):
                 except FileNotFoundError:
                     pass
                 else:
-                    os.fchmod(handle.fileno(), mode)
+                    os.chmod(temp_path, mode)
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())

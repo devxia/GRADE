@@ -1,45 +1,48 @@
 #!/usr/bin/env python3
-"""GRADE-paper API client — predict GPCR-peptide interactions via the cloud API.
+# Generated from grade/cloud.py by scripts/sync_cloud_skill.py. Do not edit directly.
+"""Standalone GRADE Cloud implementation and independent Skill CLI.
+
+This is the maintained source for skills/grade-cloud/scripts/grade_predict.py.
+Run python scripts/sync_cloud_skill.py after editing this module.
 
 Usage:
     python grade_predict.py --target-seq MRYR... --peptides candidates.fasta
-    python grade_predict.py --api-key KEY --target-seq MRYR... --peptides peptides.csv --top-k 20 -o top20.csv
+    python grade_predict.py --email user@example.org --target-seq MRYR... --peptides peptides.csv --top-k 20 -o top20.csv
 
 The ``requests`` dependency is imported only when a request is submitted.
 """
 
 import argparse
 import csv
-import getpass
 import json
 import math
 import os
+import re
+import stat
 import sys
 import tempfile
-import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
 
 API_URL = "https://devxia--grade-web.modal.run/predict"
 SUPPORTED_MODEL = "GRADE-paper"
-API_KEY_ENV = "GRADE_API_KEY"
-API_KEY_REQUEST_EMAIL = "xiabb@im.ac.cn"
+API_BASE = API_URL.rsplit("/", 1)[0]
+EMAIL_ENV = "GRADE_EMAIL"
+EMAIL_PROMPT = "Please enter your email address:"
+CONFIG_VERSION = 1
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="GRADE API client — predict GPCR-peptide interactions."
     )
-    parser.add_argument(
-        "--api-key",
-        default=None,
-        help="GRADE API key. If omitted, use GRADE_API_KEY or hidden terminal input.",
-    )
-    parser.add_argument("--target-seq", required=True, help="Target GPCR amino acid sequence.")
+    parser.add_argument("--email", help="Email address; otherwise use GRADE_EMAIL, saved email, or terminal input.")
+    parser.add_argument("--api-key", help=argparse.SUPPRESS)
+    parser.add_argument("--usage", action="store_true", help="Show remaining daily quota without submitting a prediction.")
+    parser.add_argument("--target-seq", help="Target GPCR amino acid sequence.")
     parser.add_argument(
         "--peptides",
-        required=True,
         help="Peptide file (.fasta/.faa/.fa/.csv/.txt).",
     )
     parser.add_argument(
@@ -53,6 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=None, help="Keep top K results.")
     args = parser.parse_args()
 
+    if args.api_key is not None:
+        parser.error("API keys are no longer supported. Use --email.")
+    if not args.usage and (not args.target_seq or not args.peptides):
+        parser.error("--target-seq and --peptides are required unless --usage is used")
+    if args.usage and any((args.target_seq, args.peptides, args.output, args.output_format, args.top_k is not None)):
+        parser.error("--usage cannot be combined with prediction or output arguments")
     if args.top_k is not None and args.top_k <= 0:
         parser.error("--top-k must be a positive integer")
 
@@ -66,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _nonempty_key(value: Optional[str]) -> Optional[str]:
+def _nonempty(value: Optional[str]) -> Optional[str]:
     if not isinstance(value, str):
         return None
     value = value.strip()
@@ -80,49 +89,134 @@ def _interactive_terminal(stream: TextIO) -> bool:
         return False
 
 
-def _missing_key_message() -> str:
-    return (
-        "No GRADE API key was provided. Request one from the authors at "
-        f"{API_KEY_REQUEST_EMAIL}. Provide it with --api-key, set {API_KEY_ENV}, "
-        "or run in an interactive terminal for hidden input."
-    )
+def normalize_email(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Please enter a valid email address.")
+    value = value.strip().lower()
+    if (
+        len(value) > 254
+        or not re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,63}", value)
+        or len(value.split("@")[0]) > 64
+        or any(not part or part.startswith("-") or part.endswith("-") or len(part) > 63
+               for part in value.split("@")[1].split("."))
+        or value.startswith(".") or ".@" in value or ".." in value
+    ):
+        raise ValueError("Please enter a valid email address.")
+    return value
 
 
-def resolve_api_key(explicit_key: Optional[str]) -> str:
-    """Resolve a key without printing or persisting it.
+def config_path() -> Path:
+    if sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+        return root / "GRADE" / "client.json"
+    if os.name == "nt":
+        root = Path(_nonempty(os.environ.get("LOCALAPPDATA")) or Path.home() / "AppData" / "Local")
+        suffix = Path("GRADE/client.json")
+    else:
+        root = Path(_nonempty(os.environ.get("XDG_CONFIG_HOME")) or Path.home() / ".config")
+        suffix = Path("grade/client.json")
+    if not root.is_absolute():
+        raise ValueError("Client configuration directory must be an absolute path.")
+    return root / suffix
 
-    Precedence is explicit argument, environment variable, then hidden terminal input.
-    Empty values are treated as absent. Plain-text input is never used as a fallback.
-    """
-    key = _nonempty_key(explicit_key) or _nonempty_key(os.environ.get(API_KEY_ENV))
-    if key:
-        return key
 
-    if not _interactive_terminal(sys.stdin) or not _interactive_terminal(sys.stderr):
-        raise RuntimeError(_missing_key_message())
-
-    print(
-        f"If you do not have an API key, request one from the authors at {API_KEY_REQUEST_EMAIL}.",
-        file=sys.stderr,
-    )
+def load_config(path: Path) -> dict:
+    if path.is_symlink():
+        raise ValueError("Client configuration must not be a symbolic link.")
+    if not path.exists():
+        return {}
+    if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise ValueError("Client configuration permissions must be 600.")
     try:
-        with warnings.catch_warnings():
-            # getpass warns immediately before its plain-text fallback. Raising here
-            # prevents that fallback from reading any input.
-            warnings.simplefilter("error", getpass.GetPassWarning)
-            entered = getpass.getpass("GRADE API key (input hidden): ", stream=sys.stderr)
-    except (getpass.GetPassWarning, OSError):
-        raise RuntimeError(
-            "Hidden API key input is unavailable; refusing plain-text input. "
-            f"Provide --api-key or {API_KEY_ENV}."
-        ) from None
-    except (EOFError, KeyboardInterrupt):
-        raise RuntimeError("No API key was entered; refusing to submit a request.") from None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("version") != CONFIG_VERSION
+                or data.get("api_base") != API_BASE
+                or not isinstance(data.get("client_token"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", data["client_token"])
+                or not isinstance(data.get("client_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", data["client_id"])):
+            raise ValueError
+        normalize_email(data.get("email"))
+        return data
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError("Client configuration is invalid; refusing to register a new identity automatically.") from None
 
-    key = _nonempty_key(entered)
-    if not key:
-        raise RuntimeError("No API key was entered; refusing to submit a request.")
-    return key
+
+def save_config(path: Path, data: dict) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=".client-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@contextmanager
+def config_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = path.with_suffix(".lock")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    with os.fdopen(descriptor, "r+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+            if not handle.read(1):
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def resolve_email(explicit: Optional[str], saved: Optional[str] = None) -> str:
+    email = _nonempty(explicit) or _nonempty(os.environ.get(EMAIL_ENV)) or _nonempty(saved)
+    if email is None:
+        if not _interactive_terminal(sys.stdin) or not _interactive_terminal(sys.stderr):
+            raise ValueError("Email address required. Use --email or set GRADE_EMAIL.")
+        print(EMAIL_PROMPT, file=sys.stderr, flush=True)
+        try:
+            email = sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt, OSError):
+            raise ValueError("No email address was entered.") from None
+        if not email:
+            raise ValueError("No email address was entered.")
+    return normalize_email(email)
+
+
+def client_identity(email: str, path: Path) -> dict:
+    with config_lock(path):
+        data = load_config(path)  # Re-read after locking concurrent first-use calls.
+        if not data:
+            response = post_api("/client/register", {"email": email})
+            try:
+                identity = response.json()
+                token, client_id = identity["client_token"], identity["client_id"]
+                if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+                    raise ValueError
+                if not isinstance(client_id, str) or not re.fullmatch(r"[0-9a-f]{32}", client_id):
+                    raise ValueError
+            except (ValueError, TypeError, KeyError):
+                raise ValueError("API returned an invalid client credential.") from None
+            data = {"version": CONFIG_VERSION, "api_base": API_BASE, "client_token": token, "client_id": client_id, "email": email}
+        else:
+            data = {**data, "email": email}
+        save_config(path, data)
+        return data
 
 
 def normalize_sequence(seq: str) -> str:
@@ -244,16 +338,16 @@ def load_peptides(path_str: str) -> List[Dict[str, str]]:
     return peptides
 
 
-def _redact(text: str, api_key: str) -> str:
-    """Do not echo a key reflected in a server error or model identity."""
-    for secret in (api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1]):
+def _redact(text: str, client_token: str) -> str:
+    """Do not echo a credential reflected in a server error or model identity."""
+    for secret in (client_token, json.dumps(client_token)[1:-1], repr(client_token)[1:-1]):
         if secret:
             text = text.replace(secret, "[REDACTED]")
     return text
 
 
-def api_error_message(resp: Any, api_key: str = "") -> str:
-    """Return the API-provided error text, with the submitted key redacted."""
+def api_error_message(resp: Any, client_token: str = "") -> str:
+    """Return the API-provided error text, with the submitted credential redacted."""
     try:
         data = resp.json()
     except (ValueError, TypeError):
@@ -262,7 +356,7 @@ def api_error_message(resp: Any, api_key: str = "") -> str:
         if isinstance(data, dict):
             data = data.get("error") or data.get("detail") or data
         message = str(data or "Unknown error")
-    return _redact(message, api_key)
+    return _redact(message, client_token)
 
 
 def _response_model(resp: Any, data: Dict[str, Any]) -> Optional[str]:
@@ -308,19 +402,8 @@ def check_output_path(path: Path) -> None:
         pass
 
 
-def call_api(
-    api_key: str,
-    target_seq: str,
-    peptides: List[Dict[str, str]],
-    model: str = SUPPORTED_MODEL,
-) -> List[Dict[str, Any]]:
-    """Submit peptides to the GRADE API. Returns the compatible results list."""
-    if model != SUPPORTED_MODEL:
-        raise ValueError(f"Unsupported model. Only {SUPPORTED_MODEL} is currently available.")
-    api_key = _nonempty_key(api_key)
-    if not api_key:
-        raise ValueError("API key must be a non-empty string.")
-
+def post_api(endpoint: str, body: dict, client_token: str = "") -> Any:
+    """One HTTP attempt; never auto-retry registration or prediction."""
     try:
         import requests
     except ImportError:
@@ -328,14 +411,11 @@ def call_api(
 
     try:
         resp = requests.post(
-            API_URL,
-            json={
-                "api_key": api_key,
-                "target_seq": target_seq,
-                "peptides": peptides,
-                "model": model,
-            },
-            timeout=300,
+            API_BASE + endpoint,
+            json=body,
+            headers={"Authorization": f"Bearer {client_token}"} if client_token else {},
+            timeout=300 if endpoint == "/predict" else 30,
+            allow_redirects=False,
         )
     except requests.Timeout:
         _abort(
@@ -348,26 +428,48 @@ def call_api(
         _abort("Unable to complete the GRADE API request. Check connectivity and retry.")
 
     if resp.status_code == 401:
-        _abort(
-            "Invalid API key. Check that your key is valid. If you need a key, "
-            f"request one from the authors at {API_KEY_REQUEST_EMAIL}."
-        )
+        _abort("Client credential is invalid. Contact the service maintainer. No new identity was registered.")
     elif resp.status_code == 422:
         _abort(
-            f"{api_error_message(resp, api_key)}\n"
+            f"{api_error_message(resp, client_token)}\n"
             "The request was rejected by the GRADE API. Check the API message above; "
             "it may reflect current cloud-side validation or request-size policy."
         )
     elif resp.status_code == 429:
-        _abort(
-            f"{api_error_message(resp, api_key)}\n"
-            "A cloud-side usage or rate limit was reached. Limits are enforced by the "
-            "hosted service and may change; retry later, reduce the request, or contact "
-            "the GRADE authors if you need higher throughput."
-        )
+        headers = getattr(resp, "headers", {}) or {}
+        reset = headers.get("X-GRADE-Quota-Reset")
+        retry = headers.get("Retry-After")
+        advice = f" Daily quota resets at {reset}." if reset else (f" Retry after {retry} seconds." if retry else " Retry later.")
+        _abort(_redact(f"{api_error_message(resp, client_token)}\nA cloud-side usage or rate limit was reached.{advice}", client_token))
     elif resp.status_code != 200:
-        _abort(f"API returned status {resp.status_code}: {api_error_message(resp, api_key)}")
+        _abort(f"API returned status {resp.status_code}: {api_error_message(resp, client_token)}")
+    return resp
 
+
+def show_quota(resp: Any, client_token: str) -> None:
+    headers = getattr(resp, "headers", {}) or {}
+    remaining, limit, reset = (headers.get(f"X-GRADE-Quota-{name}") for name in ("Remaining", "Limit", "Reset"))
+    if remaining is not None and limit is not None and reset is not None:
+        print(_redact(f"Daily quota remaining: {remaining}/{limit}. Resets at {reset}.", client_token), file=sys.stderr)
+
+
+def call_api(
+    target_seq: str,
+    peptides: List[Dict[str, str]],
+    *,
+    email: str,
+    client_token: str,
+    model: str = SUPPORTED_MODEL,
+) -> List[Dict[str, Any]]:
+    """Submit one prediction; credentials are keyword-only to reject old Key calls."""
+    if model != SUPPORTED_MODEL:
+        raise ValueError(f"Unsupported model. Only {SUPPORTED_MODEL} is currently available.")
+    email = normalize_email(email)
+    if not _nonempty(client_token):
+        raise ValueError("Client credential must be a non-empty string.")
+    resp = post_api("/predict", {
+        "email": email, "target_seq": target_seq, "peptides": peptides, "model": model,
+    }, client_token)
     try:
         data = resp.json()
     except (ValueError, TypeError):
@@ -380,10 +482,10 @@ def call_api(
     except ValueError as exc:
         _abort(str(exc))
     if actual_model is not None:
-        print(f"Server reported model: {_redact(actual_model, api_key)}", file=sys.stderr)
+        print(f"Server reported model: {_redact(actual_model, client_token)}", file=sys.stderr)
         if actual_model != model:
             _abort(_redact(
-                f"API returned model {actual_model!r}, but {model!r} was requested.", api_key
+                f"API returned model {actual_model!r}, but {model!r} was requested.", client_token
             ))
 
     results = data.get("results")
@@ -402,35 +504,51 @@ def call_api(
             valid_score = False
         if not valid_score:
             _abort(f"API result {index} has an invalid score.")
+    show_quota(resp, client_token)
     return results
+
+
+def query_usage(email: str, client_token: str) -> dict:
+    resp = post_api("/usage", {"email": email}, client_token)
+    try:
+        data = resp.json()
+        if (not isinstance(data, dict) or type(data.get("limit")) is not int
+                or type(data.get("remaining")) is not int
+                or not 0 <= data["remaining"] <= data["limit"]
+                or not isinstance(data.get("reset_at"), str)):
+            raise ValueError
+    except (ValueError, TypeError):
+        _abort("API returned invalid usage information.")
+    return data
 
 
 def main() -> None:
     args = parse_args()
 
-    provided_key = _nonempty_key(args.api_key) or _nonempty_key(os.environ.get(API_KEY_ENV))
-    if not provided_key and (
-        not _interactive_terminal(sys.stdin) or not _interactive_terminal(sys.stderr)
-    ):
-        _abort(_missing_key_message())
-
+    client_token = ""
     try:
-        target_seq = validate_sequence(args.target_seq, "target sequence")
-        peptides = load_peptides(args.peptides)
-        if args.output:
-            check_output_path(Path(args.output))
+        path = config_path()
+        saved = load_config(path)
+        client_token = saved.get("client_token", "")
+        if not args.usage:
+            target_seq = validate_sequence(args.target_seq, "target sequence")
+            peptides = load_peptides(args.peptides)
+            if args.output:
+                check_output_path(Path(args.output))
+        email = resolve_email(args.email, saved.get("email"))
+        identity = client_identity(email, path)
+        client_token = identity["client_token"]
     except (ValueError, OSError, UnicodeError) as exc:
-        _abort(_redact(str(exc), provided_key or ""))
+        _abort(_redact(str(exc), client_token))
 
-    try:
-        api_key = resolve_api_key(args.api_key)
-    except RuntimeError as exc:
-        _abort(str(exc))
+    if args.usage:
+        data = query_usage(email, client_token)
+        print(_redact(f"Daily quota remaining: {data['remaining']}/{data['limit']}. Resets at {data['reset_at']}.", client_token))
+        return
 
     print(f"Loaded {len(peptides)} peptides from {args.peptides}", file=sys.stderr)
     print(f"Submitting {len(peptides)} peptides to the GRADE API...", file=sys.stderr)
-
-    all_results = call_api(api_key, target_seq, peptides, model=args.model)
+    all_results = call_api(target_seq, peptides, email=email, client_token=client_token, model=args.model)
 
     # Sort by score descending
     all_results.sort(key=lambda x: float(x["score"]), reverse=True)
@@ -471,7 +589,7 @@ def main() -> None:
     except (OSError, UnicodeError) as exc:
         _abort(_redact(
             f"Could not write output: {exc}. The API request has already completed; quota may have been used.",
-            api_key,
+            client_token,
         ))
 
     if args.output:

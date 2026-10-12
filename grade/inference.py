@@ -1,8 +1,7 @@
-"""GRADE inference pipeline.
+"""Unified CLI entrypoint and local multi-GPU inference pipeline.
 
-CLI-driven, multi-GPU inference with incremental checkpointing and
-automatic resume. Coordinates TCM (target resolution), PAM (peptide
-loading/tokenization), and IFM (model construction and scoring).
+The CLI defaults to Cloud. Explicit --model-dir selects the local pipeline
+with incremental checkpointing, target caching and automatic resume.
 """
 
 from __future__ import annotations
@@ -432,8 +431,10 @@ def run_inference(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    from .runner import run
+
     args = parse_args()
-    run_inference(args)
+    run(args, run_inference)
 
 
 if __name__ == "__main__":

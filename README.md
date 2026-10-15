@@ -10,14 +10,19 @@ The **grade-client** Python package provides the `grade` command. GRADE is also 
 
 ## Install
 
-Use Python 3.11 or newer. Clone the [GRADE repository](https://github.com/devxia/GRADE) and install the package in a virtual environment:
+Use Python 3.11 or newer. Install [grade-client](https://pypi.org/project/grade-client/) from PyPI in a virtual environment:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install grade-client
+```
+
+Alternatively, install from the [source repository](https://github.com/devxia/GRADE) in the activated environment:
 
 ```bash
 git clone https://github.com/devxia/GRADE.git
 cd GRADE
-
-python3.11 -m venv .venv
-source .venv/bin/activate
 python -m pip install .
 ```
 
@@ -153,11 +158,13 @@ Supply the target sequence with `--target-seq`, the candidate file with `--pepti
 
 GRADE uses Cloud resources unless you specify a local model directory with `--model-dir`. Local inference requires no email and has no Cloud quota.
 
-From the cloned `GRADE` directory, install the local inference dependencies:
+Install the local inference dependencies:
 
 ```bash
-python -m pip install ".[local]"
+python -m pip install "grade-client[local]"
 ```
+
+For a source installation, run `python -m pip install ".[local]"` from the cloned `GRADE` directory instead.
 
 Use Python 3.11 with PyTorch 2.4.0 and Transformers 4.44.0. A CUDA-enabled GPU is recommended for larger screens; CPU inference is also supported.
 

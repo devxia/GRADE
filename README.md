@@ -2,6 +2,8 @@
 
 **GPCR-targeted Ranking-guided Agonist Design Engine**
 
+![Overview of the GRADE framework](https://raw.githubusercontent.com/devxia/GRADE/main/images/grade-overview.png)
+
 GRADE ranks candidate peptides for predicted agonist activity at a target GPCR. Supply a GPCR amino acid sequence and a peptide list to receive scores sorted from highest to lowest for experimental prioritization.
 
 The **grade-client** Python package provides the `grade` command. GRADE is also available through an independent [Agent Skill](#agent-skill) and the [Cloud API](#cloud-api).
@@ -273,7 +275,7 @@ Successful responses include `X-GRADE-Model`, `X-GRADE-Quota-Limit`, `X-GRADE-Qu
 
 If you use GRADE in your research, please cite:
 
-> [Authors]. [Article title]. *[Journal]* **[Volume]**, [Pages] ([Year]). DOI: [DOI].
+> Xia, B. et al. Peptide agonist design from GPCR sequences. *LangTaoSha Preprint Server*, preprint (2026). https://doi.org/10.65215/LTSpreprints.2026.10.15.000361.
 
 ## License
 

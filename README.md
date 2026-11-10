@@ -2,9 +2,9 @@
 
 **GPCR-targeted Ranking-guided Agonist Design Engine**
 
-![Overview of the GRADE framework](https://raw.githubusercontent.com/devxia/GRADE/main/images/grade-overview.png)
-
 GRADE ranks candidate peptides for predicted agonist activity at a target GPCR. Supply a GPCR amino acid sequence and a peptide list to receive scores sorted from highest to lowest for experimental prioritization.
+
+![GRADE ranks candidate peptides for a GPCR target by predicted agonist activity](https://raw.githubusercontent.com/devxia/GRADE/main/assets/readme/grade-workflow.svg)
 
 The **grade-client** Python package provides the `grade` command. GRADE is also available through an independent [Agent Skill](#agent-skill) and the [Cloud API](#cloud-api).
 
@@ -49,6 +49,16 @@ grade \
   --peptides candidates.fasta \
   --output scores.csv
 ```
+
+The output in `scores.csv` is sorted by descending score. This preview illustrates the format; the scores are examples, not predictions for these peptides:
+
+```csv
+rank,target,peptide_name,src,sequence,score
+1,CCR5_HUMAN,peptide_1,grade-api,ACDEFGHIKLMNPQRSTVWY,0.82
+2,CCR5_HUMAN,peptide_2,grade-api,YTVSRQPNMLKIHGFEDCA,0.31
+```
+
+See [Inputs and result files](#inputs-and-result-files) for field definitions and score interpretation.
 
 Replace the example peptides with your candidates. For non-interactive use, add `--email user@example.org`. Run `grade --help` for all command options.
 
@@ -215,6 +225,11 @@ Batch size applies per process. Distributed execution requires an explicit local
 
 ### Local options and resume
 
+Local runs save progress automatically. The default tokenizer limit is 1024 tokens; longer sequences are truncated.
+
+<details>
+<summary>Advanced local options and resume requirements</summary>
+
 | Local-only option | Default | Purpose |
 |---|---|---|
 | `--batch-size` | 8 | Candidates per batch per process |
@@ -228,7 +243,9 @@ Batch size applies per process. Distributed execution requires an explicit local
 
 These options require `--model-dir`.
 
-Local runs save progress automatically. Resume with the same output path, model identity and resolved directory, target identifier/sequence, ordered candidate identifiers/sequences, effective source label, maximum length, process count, precision and attention settings. Changing the candidate filename can change its default source label. `--top-k` and output format may change when resuming. Incompatible progress files are rejected without replacing existing results; choose a new output path or explicitly use `--no-resume`.
+Resume with the same output path, model identity and resolved directory, target identifier/sequence, ordered candidate identifiers/sequences, effective source label, maximum length, process count, precision and attention settings. Changing the candidate filename can change its default source label. `--top-k` and output format may change when resuming. Incompatible progress files are rejected without replacing existing results; choose a new output path or explicitly use `--no-resume`.
+
+</details>
 
 ## Cloud API
 
@@ -244,7 +261,8 @@ The package and Skill handle these requests for most users. Direct integrations 
 
 Register once with an email, retain the issued credential privately, and send it in subsequent requests as `Authorization: Bearer <client_token>`. Do not put real credentials in published scripts or logs.
 
-Example prediction request for the bundled CCR5_HUMAN sequence:
+<details>
+<summary>Example prediction request for the bundled CCR5_HUMAN sequence</summary>
 
 ```json
 {
@@ -257,6 +275,8 @@ Example prediction request for the bundled CCR5_HUMAN sequence:
   ]
 }
 ```
+
+</details>
 
 Omitting `model` selects GRADE-paper. Explicit null, empty or unsupported selections are rejected. Optional `format` is `json` (default), `csv` or `tsv`.
 

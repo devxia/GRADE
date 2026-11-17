@@ -1,38 +1,46 @@
-# GRADE
+<picture>
+  <source media="(max-width: 600px)" srcset="./assets/readme/grade-hero-mobile.svg">
+  <img src="./assets/readme/grade-hero.svg" width="100%" alt="GRADE — rank candidate peptide agonists for a GPCR target. GPCR sequence and peptide candidates enter GRADE-paper and return as ranked candidates for experimental prioritization.">
+</picture>
 
 **GPCR-targeted Ranking-guided Agonist Design Engine**
 
 GRADE ranks candidate peptides for predicted agonist activity at a target GPCR. Supply a GPCR amino acid sequence and a peptide list to receive scores sorted from highest to lowest for experimental prioritization.
 
-![GRADE ranks candidate peptides for a GPCR target by predicted agonist activity](https://raw.githubusercontent.com/devxia/GRADE/main/assets/readme/grade-workflow.svg)
+[**Install**](#install) · [**Quick Start**](#quick-start) · [Agent Skill](#agent-skill) · [Local inference](#use-a-local-model) · [Cloud API](#cloud-api) · [Citation](#citation)
 
-The **grade-client** Python package provides the `grade` command. GRADE is also available through an independent [Agent Skill](#agent-skill) and the [Cloud API](#cloud-api).
-
-**GRADE-paper** is the model used in the accompanying publication.
+`grade-client` · Python 3.11+ · Model: **GRADE-paper** · [Preprint](https://doi.org/10.65215/LTSpreprints.2026.10.15.000361) · [MIT License](LICENSE)
 
 ## Install
 
-Use Python 3.11 or newer. Install [grade-client](https://pypi.org/project/grade-client/) from PyPI in a virtual environment:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install grade-client
-```
-
-Alternatively, install from the [source repository](https://github.com/devxia/GRADE) in the activated environment:
+Use Python 3.11 or newer. Create a virtual environment and install from source:
 
 ```bash
 git clone https://github.com/devxia/GRADE.git
 cd GRADE
+python3.11 -m venv .venv
+source .venv/bin/activate
 python -m pip install .
 ```
+
+<details>
+<summary>Install the Python package from PyPI</summary>
+
+In an activated virtual environment, install [grade-client](https://pypi.org/project/grade-client/):
+
+```bash
+python -m pip install grade-client
+```
+
+</details>
 
 ## Quick Start
 
 An email address is required to use the prediction service.
 
-Save your candidates as `candidates.fasta`:
+**1. Prepare your candidates**
+
+Save this example as `candidates.fasta`:
 
 ```fasta
 >peptide_1
@@ -40,6 +48,8 @@ ACDEFGHIKLMNPQRSTVWY
 >peptide_2
 YTVSRQPNMLKIHGFEDCA
 ```
+
+**2. Rank against a target**
 
 Run a prediction against the bundled human CCR5 target:
 
@@ -50,7 +60,9 @@ grade \
   --output scores.csv
 ```
 
-The output in `scores.csv` is sorted by descending score. This preview illustrates the format; the scores are examples, not predictions for these peptides:
+**3. Read the ranked results**
+
+The output in `scores.csv` is sorted by descending score. These scores illustrate the format; they are not predictions for the example peptides:
 
 ```csv
 rank,target,peptide_name,src,sequence,score
@@ -58,7 +70,7 @@ rank,target,peptide_name,src,sequence,score
 2,CCR5_HUMAN,peptide_2,grade-api,YTVSRQPNMLKIHGFEDCA,0.31
 ```
 
-See [Inputs and result files](#inputs-and-result-files) for field definitions and score interpretation.
+Scores range from 0 to 1; higher scores indicate greater predicted agonist potential. Functional assays are needed to establish agonist activity. See [Inputs and result files](#inputs-and-result-files) for field definitions and interpretation.
 
 Replace the example peptides with your candidates. For non-interactive use, add `--email user@example.org`. Run `grade --help` for all command options.
 
@@ -77,6 +89,9 @@ If the target FASTA has several entries, add `--target-name` with the complete h
 
 ### Inputs and result files
 
+<details>
+<summary>Accepted target inputs and peptide file formats</summary>
+
 | Target input | Arguments | Requirement |
 |---|---|---|
 | Bundled GPCR | `--target-name CCR5_HUMAN` | Exact header in the [bundled FASTA](grade/targets/targets_gpcr_v2.fa) |
@@ -90,6 +105,8 @@ If the target FASTA has several entries, add `--target-name` with the complete h
 | CSV | `.csv` | `sequence`, `peptide` or `seq` column; optional `name`, `peptide_name` or `id` |
 | Text | `.txt` | One sequence per line, or whitespace-separated name and sequence |
 
+</details>
+
 Sequence whitespace is removed and letters are uppercased. Empty sequences and duplicate identifiers are rejected. Supply amino acid letters without residue numbers or chemical modification notation. Cloud encodes each target and peptide with a 1024-token limit, including special tokens; longer sequences are truncated.
 
 Use the output extension to choose CSV, TSV or JSON. To keep only the highest-scoring candidates:
@@ -102,7 +119,12 @@ grade \
   --output top20.json
 ```
 
-`--output-format` overrides extension-based selection. An unrecognized extension defaults to CSV. The package writes the following fields; JSON output is an array with the same keys:
+`--output-format` overrides extension-based selection. An unrecognized extension defaults to CSV.
+
+<details>
+<summary>Output fields — CSV, TSV and JSON</summary>
+
+The package writes the following fields; JSON output is an array with the same keys:
 
 | Field | Meaning |
 |---|---|
@@ -112,6 +134,8 @@ grade \
 | `src` | Source label; override with `--source-label` |
 | `sequence` | Normalized candidate sequence |
 | `score` | Positive-class softmax score from 0 to 1 |
+
+</details>
 
 Higher scores indicate greater predicted agonist potential for the target GPCR. The accompanying work treats scores above 0.9 as high-confidence candidates for experimental prioritization, not as a mandatory cutoff or calibrated probability of success. Functional assays are needed to establish agonist activity.
 
@@ -196,6 +220,9 @@ Local requests remain on your machine. Errors do not trigger a fallback to Cloud
 
 ### GPU and multi-GPU inference
 
+<details>
+<summary>CUDA mixed precision and distributed inference examples</summary>
+
 For CUDA mixed precision:
 
 ```bash
@@ -222,6 +249,8 @@ torchrun --nproc_per_node=4 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 \
 ```
 
 Batch size applies per process. Distributed execution requires an explicit local model directory. CPU users should omit mixed-precision flags.
+
+</details>
 
 ### Local options and resume
 
@@ -280,6 +309,9 @@ Register once with an email, retain the issued credential privately, and send it
 
 Omitting `model` selects GRADE-paper. Explicit null, empty or unsupported selections are rejected. Optional `format` is `json` (default), `csv` or `tsv`.
 
+<details>
+<summary>Response fields, headers and status codes</summary>
+
 JSON responses contain `model`, `target`, `count` and descending-score `results`. Each result has `peptide_name`, `sequence` and `score`. The direct API labels its target `custom_target`; the package retains a locally resolved FASTA target name in its output. Direct CSV/TSV responses contain `rank,target,peptide_name,src,sequence,score`, with `src` set to `grade-api`.
 
 Successful responses include `X-GRADE-Model`, `X-GRADE-Quota-Limit`, `X-GRADE-Quota-Remaining` and `X-GRADE-Quota-Reset`. The [Cloud quota](#cloud-quota) applies to every access method.
@@ -291,11 +323,13 @@ Successful responses include `X-GRADE-Model`, `X-GRADE-Quota-Limit`, `X-GRADE-Qu
 | 429 | Daily quota or short-term frequency limit; follow reset/`Retry-After` |
 | 500/503 | Server failure or uncertain outcome; check usage before retrying |
 
+</details>
+
 ## Citation
 
 If you use GRADE in your research, please cite:
 
-> Xia, B. et al. Peptide agonist design from GPCR sequences. *LangTaoSha Preprint Server*, preprint (2026). https://doi.org/10.65215/LTSpreprints.2026.10.15.000361.
+> Xia, B. et al. Peptide agonist design from GPCR sequences. *LangTaoSha Preprint Server*, preprint (2026). <https://doi.org/10.65215/LTSpreprints.2026.10.15.000361>.
 
 ## License
 

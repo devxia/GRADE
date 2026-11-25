@@ -2,9 +2,11 @@
 
 import argparse
 import os
+import sys
 from collections.abc import Sequence
 
 from . import __version__
+from .cloud import parse_auth_args
 from .model_registry import DEFAULT_MODEL_ID, available_models, get_model_spec
 from .writers import infer_format_from_path, supported_formats
 
@@ -18,8 +20,11 @@ LOCAL_DEFAULTS = {
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    auth = parse_auth_args(sys.argv[1:] if argv is None else argv)
+    if auth is not None:
+        return auth
     parser = argparse.ArgumentParser(
-        description="GRADE: use Cloud by default, or --model-dir for local GPCR-peptide inference.",
+        description="GRADE GPCR-peptide inference. Cloud account commands: login, logout, whoami.",
         allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=f"grade-client {__version__}")
@@ -31,7 +36,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-format", choices=supported_formats(), help="Output format; otherwise inferred from the output extension.")
     parser.add_argument("--top-k", type=int, help="Keep the highest K results; Cloud quota counts all submitted peptides.")
     parser.add_argument("--source-label", help="Optional src label; default: grade-api on Cloud, candidate file stem locally.")
-    parser.add_argument("--email", help="Cloud email; otherwise GRADE_EMAIL, saved email, or terminal input.")
+    parser.add_argument("--email", help="Expected verified Cloud email (optional).")
     parser.add_argument("--usage", action="store_true", help="Query Cloud quota without prediction inputs.")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--model", choices=available_models(), help=f"Cloud model (default: {DEFAULT_MODEL_ID}).")

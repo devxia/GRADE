@@ -7,7 +7,7 @@ Run python scripts/sync_cloud_skill.py after editing this module.
 
 Usage:
     python grade_predict.py --target-seq MRYR... --peptides candidates.fasta
-    python grade_predict.py --email user@example.org --target-seq MRYR... --peptides peptides.csv --top-k 20 -o top20.csv
+    python grade_predict.py login --no-browser
 
 The ``requests`` dependency is imported only when a request is submitted.
 """
@@ -21,23 +21,40 @@ import re
 import stat
 import sys
 import tempfile
+import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
+from urllib.parse import urlsplit
 
 API_URL = "https://devxia--grade-web.modal.run/predict"
+SKILL_VERSION = "1.3.0"
 SUPPORTED_MODEL = "GRADE-paper"
-API_BASE = API_URL.rsplit("/", 1)[0]
-EMAIL_ENV = "GRADE_EMAIL"
-EMAIL_PROMPT = "Please enter your email address:"
-CONFIG_VERSION = 1
+API_BASE = (os.environ.get("GRADE_CLOUD_URL") or API_URL.rsplit("/", 1)[0]).rstrip("/")
+AUTH_BASE = (os.environ.get("GRADE_AUTH_URL") or "https://grade.devxia.cc").rstrip("/")
+CONFIG_VERSION = 2
+TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+def parse_auth_args(argv):
+    if not argv or argv[0] not in {"login", "logout", "whoami"}:
+        return None
+    command = argv[0]
+    parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} {command}", allow_abbrev=False)
+    if command == "login":
+        parser.add_argument("--email", help="Expected verified email (optional).")
+        parser.add_argument("--no-browser", action="store_true", help="Print the browser instructions without opening a tab.")
+    return parser.parse_args(argv[1:], namespace=argparse.Namespace(auth_command=command))
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="GRADE API client — predict GPCR-peptide interactions."
-    )
-    parser.add_argument("--email", help="Email address; otherwise use GRADE_EMAIL, saved email, or terminal input.")
+    auth = parse_auth_args(sys.argv[1:])
+    if auth is not None:
+        return auth
+    parser = argparse.ArgumentParser(description="GRADE Cloud inference. Account commands: login, logout, whoami.")
+    parser.add_argument("--version", action="version", version=f"grade-cloud {SKILL_VERSION}")
+    parser.add_argument("--email", help="Expected verified email (optional).")
     parser.add_argument("--api-key", help=argparse.SUPPRESS)
     parser.add_argument("--usage", action="store_true", help="Show remaining daily quota without submitting a prediction.")
     parser.add_argument("--target-seq", help="Target GPCR amino acid sequence.")
@@ -57,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     if args.api_key is not None:
-        parser.error("API keys are no longer supported. Use --email.")
+        parser.error("API keys are no longer supported. Run login.")
     if not args.usage and (not args.target_seq or not args.peptides):
         parser.error("--target-seq and --peptides are required unless --usage is used")
     if args.usage and any((args.target_seq, args.peptides, args.output, args.output_format, args.top_k is not None)):
@@ -106,6 +123,11 @@ def normalize_email(value: str) -> str:
 
 
 def config_path() -> Path:
+    if override := os.environ.get("GRADE_CONFIG_DIR"):
+        root = Path(override)
+        if not root.is_absolute():
+            raise ValueError("GRADE_CONFIG_DIR must be an absolute path.")
+        return root / "client.json"
     if sys.platform == "darwin":
         root = Path.home() / "Library" / "Application Support"
         return root / "GRADE" / "client.json"
@@ -129,17 +151,17 @@ def load_config(path: Path) -> dict:
         raise ValueError("Client configuration permissions must be 600.")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("version") == 1 and data.get("api_base") == API_BASE:
+            return {}
         if (not isinstance(data, dict) or data.get("version") != CONFIG_VERSION
-                or data.get("api_base") != API_BASE
-                or not isinstance(data.get("client_token"), str)
-                or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", data["client_token"])
-                or not isinstance(data.get("client_id"), str)
-                or not re.fullmatch(r"[0-9a-f]{32}", data["client_id"])):
+                or data.get("api_base") != API_BASE or data.get("auth_base") != AUTH_BASE
+                or not valid_token(data.get("access_token")) or not valid_token(data.get("refresh_token"))
+                or type(data.get("access_end")) is not int or type(data.get("session_end")) is not int):
             raise ValueError
         normalize_email(data.get("email"))
         return data
     except (ValueError, TypeError, UnicodeError):
-        raise ValueError("Client configuration is invalid; refusing to register a new identity automatically.") from None
+        raise ValueError("Client configuration is invalid or belongs to a different service.") from None
 
 
 def save_config(path: Path, data: dict) -> None:
@@ -183,40 +205,160 @@ def config_lock(path: Path):
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def resolve_email(explicit: Optional[str], saved: Optional[str] = None) -> str:
-    email = _nonempty(explicit) or _nonempty(os.environ.get(EMAIL_ENV)) or _nonempty(saved)
-    if email is None:
-        if not _interactive_terminal(sys.stdin) or not _interactive_terminal(sys.stderr):
-            raise ValueError("Email address required. Use --email or set GRADE_EMAIL.")
-        print(EMAIL_PROMPT, file=sys.stderr, flush=True)
+def valid_token(value) -> bool:
+    return isinstance(value, str) and TOKEN_PATTERN.fullmatch(value) is not None
+
+
+def _check_origin(value):
+    url = urlsplit(value)
+    local = url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
+    if (not url.hostname or url.username is not None or url.path or url.query or url.fragment
+            or (url.scheme != "https" and not local)):
+        raise ValueError("GRADE service origins require HTTPS except on loopback.")
+
+
+def _auth_post(endpoint, fields):
+    _check_origin(AUTH_BASE)
+    try:
+        import requests
+    except ImportError:
+        raise ValueError("The requests package is required for Cloud login.") from None
+    try:
+        response = requests.post(AUTH_BASE + endpoint, data={"client_id": "grade-cli", **fields},
+                                 timeout=10, allow_redirects=False)
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        raise ValueError("Could not complete the request to the GRADE login service.") from None
+    if not isinstance(data, dict):
+        raise ValueError("Invalid response from the GRADE login service.")
+    return response.status_code, data
+
+
+def _session(result, saved=None):
+    token, lifetime = result.get("access_token"), result.get("expires_in")
+    if not valid_token(token) or type(lifetime) is not int or not 1 <= lifetime <= 1800 or result.get("token_type") != "Bearer":
+        raise ValueError("Invalid access token response from GRADE.")
+    now = int(time.time())
+    email = normalize_email(result.get("email"))
+    if saved:
+        if email != saved["email"]:
+            raise ValueError("GRADE login returned a different account.")
+        data = saved.copy()
+    else:
+        refresh, duration = result.get("refresh_token"), result.get("session_expires_in")
+        if not valid_token(refresh) or type(duration) is not int or not 1 <= duration <= 14 * 86400:
+            raise ValueError("Invalid session response from GRADE.")
+        data = {"version": CONFIG_VERSION, "auth_base": AUTH_BASE, "api_base": API_BASE,
+                "refresh_token": refresh, "session_end": now + duration, "email": email}
+    return {**data, "access_token": token, "access_end": min(now + lifetime, data["session_end"])}
+
+
+def _revoke(token):
+    status, _ = _auth_post("/oauth/revoke", {"token": token, "token_type_hint": "refresh_token"})
+    if status != 200:
+        raise ValueError("GRADE could not revoke the session. Try again later.")
+
+
+def _device_login(expected_email, no_browser=False):
+    _check_origin(API_BASE)
+    status, grant = _auth_post("/oauth/device/code", {"scope": "predict usage"})
+    if status != 200:
+        raise ValueError("GRADE could not start device login. Try again later.")
+    uri, code, device = (grant.get(key) for key in ("verification_uri", "user_code", "device_code"))
+    duration, interval = grant.get("expires_in"), grant.get("interval", 5)
+    if (uri != AUTH_BASE + "/device" or not isinstance(code, str) or not re.fullmatch(r"[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}", code)
+            or not valid_token(device) or type(duration) is not int or not 1 <= duration <= 600
+            or type(interval) is not int or not 1 <= interval <= 60):
+        raise ValueError("Invalid device login response from GRADE.")
+    print(f"Open {uri} and enter code {code}.", file=sys.stderr, flush=True)
+    if expected_email:
+        print(f"Authorize with {expected_email}.", file=sys.stderr, flush=True)
+    if not no_browser and _interactive_terminal(sys.stderr):
+        import webbrowser
         try:
-            email = sys.stdin.readline()
-        except (EOFError, KeyboardInterrupt, OSError):
-            raise ValueError("No email address was entered.") from None
-        if not email:
-            raise ValueError("No email address was entered.")
-    return normalize_email(email)
+            webbrowser.open(uri)
+        except (OSError, webbrowser.Error):
+            pass
+    deadline = time.monotonic() + duration
+    while deadline - time.monotonic() > interval:
+        time.sleep(interval)
+        status, result = _auth_post("/oauth/token", {"grant_type": DEVICE_GRANT, "device_code": device})
+        if status == 200:
+            session = _session(result)
+            if expected_email and session["email"] != expected_email:
+                _revoke(session["refresh_token"])
+                raise ValueError("The verified email differs from the requested account. Run login again.")
+            return session
+        error = result.get("error") if status == 400 else None
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            interval += 5
+            continue
+        if error == "access_denied":
+            raise ValueError("Device login was declined.")
+        if error == "expired_token":
+            break
+        raise ValueError("Device login could not be completed. Run login again.")
+    raise ValueError("The device code expired. Run login again.")
 
 
-def client_identity(email: str, path: Path) -> dict:
+def _email_hint(explicit):
+    hint = _nonempty(explicit) or _nonempty(os.environ.get("GRADE_EMAIL"))
+    return normalize_email(hint) if hint else None
+
+
+def client_identity(email: Optional[str], path: Path, *, interactive=True) -> dict:
+    email = _email_hint(email)
     with config_lock(path):
-        data = load_config(path)  # Re-read after locking concurrent first-use calls.
-        if not data:
-            response = post_api("/client/register", {"email": email})
-            try:
-                identity = response.json()
-                token, client_id = identity["client_token"], identity["client_id"]
-                if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
-                    raise ValueError
-                if not isinstance(client_id, str) or not re.fullmatch(r"[0-9a-f]{32}", client_id):
-                    raise ValueError
-            except (ValueError, TypeError, KeyError):
-                raise ValueError("API returned an invalid client credential.") from None
-            data = {"version": CONFIG_VERSION, "api_base": API_BASE, "client_token": token, "client_id": client_id, "email": email}
-        else:
-            data = {**data, "email": email}
+        saved = load_config(path)
+        now = time.time()
+        if saved and saved["session_end"] > now:
+            if email and saved["email"] != email:
+                raise ValueError("The requested email differs from the active GRADE account. Run logout, then login.")
+            if saved["access_end"] > now + 30:
+                return saved
+            status, result = _auth_post("/oauth/token", {"grant_type": "refresh_token", "refresh_token": saved["refresh_token"]})
+            if status == 200:
+                data = _session(result, saved)
+                save_config(path, data)
+                return data
+            if status != 400 or result.get("error") != "invalid_grant":
+                raise ValueError("GRADE could not refresh your login. Try again later.")
+        if not interactive or not (_interactive_terminal(sys.stdin) and _interactive_terminal(sys.stderr)):
+            raise ValueError("No active GRADE login. Run login in a terminal first.")
+        data = _device_login(email)
         save_config(path, data)
         return data
+
+
+def run_auth_command(args) -> None:
+    try:
+        path = config_path()
+        if args.auth_command == "whoami":
+            data = client_identity(None, path, interactive=False)
+            query_usage(data["access_token"])
+            print(data["email"])
+            return
+        with config_lock(path):
+            old = load_config(path)
+            if args.auth_command == "logout":
+                if old:
+                    _revoke(old["refresh_token"])
+                    path.unlink(missing_ok=True)
+                print("Signed out of GRADE.")
+                return
+            data = _device_login(_email_hint(args.email), args.no_browser)
+            if old:
+                _revoke(old["refresh_token"])
+            save_config(path, data)
+            print(f"Signed in to GRADE as {data['email']}.")
+    except ValueError as error:
+        _abort(str(error))
+    except OSError:
+        _abort("Could not update the GRADE login configuration.")
+    except KeyboardInterrupt:
+        _abort("GRADE login was cancelled.")
 
 
 def normalize_sequence(seq: str) -> str:
@@ -403,7 +545,8 @@ def check_output_path(path: Path) -> None:
 
 
 def post_api(endpoint: str, body: dict, client_token: str = "") -> Any:
-    """One HTTP attempt; never auto-retry registration or prediction."""
+    """Submit each Cloud request once."""
+    _check_origin(API_BASE)
     try:
         import requests
     except ImportError:
@@ -428,7 +571,7 @@ def post_api(endpoint: str, body: dict, client_token: str = "") -> Any:
         _abort("Unable to complete the GRADE API request. Check connectivity and retry.")
 
     if resp.status_code == 401:
-        _abort("Client credential is invalid. Contact the service maintainer. No new identity was registered.")
+        _abort("GRADE login is no longer active. Run login again.")
     elif resp.status_code == 422:
         _abort(
             f"{api_error_message(resp, client_token)}\n"
@@ -457,18 +600,16 @@ def call_api(
     target_seq: str,
     peptides: List[Dict[str, str]],
     *,
-    email: str,
     client_token: str,
     model: str = SUPPORTED_MODEL,
 ) -> List[Dict[str, Any]]:
     """Submit one prediction; credentials are keyword-only to reject old Key calls."""
     if model != SUPPORTED_MODEL:
         raise ValueError(f"Unsupported model. Only {SUPPORTED_MODEL} is currently available.")
-    email = normalize_email(email)
-    if not _nonempty(client_token):
+    if not valid_token(client_token):
         raise ValueError("Client credential must be a non-empty string.")
     resp = post_api("/predict", {
-        "email": email, "target_seq": target_seq, "peptides": peptides, "model": model,
+        "target_seq": target_seq, "peptides": peptides, "model": model,
     }, client_token)
     try:
         data = resp.json()
@@ -508,8 +649,8 @@ def call_api(
     return results
 
 
-def query_usage(email: str, client_token: str) -> dict:
-    resp = post_api("/usage", {"email": email}, client_token)
+def query_usage(client_token: str) -> dict:
+    resp = post_api("/usage", {}, client_token)
     try:
         data = resp.json()
         if (not isinstance(data, dict) or type(data.get("limit")) is not int
@@ -524,31 +665,32 @@ def query_usage(email: str, client_token: str) -> dict:
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "auth_command", None):
+        run_auth_command(args)
+        return
 
     client_token = ""
     try:
-        path = config_path()
-        saved = load_config(path)
-        client_token = saved.get("client_token", "")
         if not args.usage:
             target_seq = validate_sequence(args.target_seq, "target sequence")
             peptides = load_peptides(args.peptides)
             if args.output:
                 check_output_path(Path(args.output))
-        email = resolve_email(args.email, saved.get("email"))
-        identity = client_identity(email, path)
-        client_token = identity["client_token"]
+        identity = client_identity(args.email, config_path())
+        client_token = identity["access_token"]
     except (ValueError, OSError, UnicodeError) as exc:
         _abort(_redact(str(exc), client_token))
+    except KeyboardInterrupt:
+        _abort("GRADE login was cancelled.")
 
     if args.usage:
-        data = query_usage(email, client_token)
+        data = query_usage(client_token)
         print(_redact(f"Daily quota remaining: {data['remaining']}/{data['limit']}. Resets at {data['reset_at']}.", client_token))
         return
 
     print(f"Loaded {len(peptides)} peptides from {args.peptides}", file=sys.stderr)
     print(f"Submitting {len(peptides)} peptides to the GRADE API...", file=sys.stderr)
-    all_results = call_api(target_seq, peptides, email=email, client_token=client_token, model=args.model)
+    all_results = call_api(target_seq, peptides, client_token=client_token, model=args.model)
 
     # Sort by score descending
     all_results.sort(key=lambda x: float(x["score"]), reverse=True)

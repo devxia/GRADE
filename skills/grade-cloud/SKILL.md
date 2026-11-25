@@ -1,10 +1,11 @@
 ---
 name: grade-cloud
+metadata:
+  version: "1.3.0"
 description: >
   Rank peptide candidates for predicted GPCR agonist activity via the GRADE cloud
   API. Use when the user wants to score peptides against a GPCR target or
-  prioritize candidates for experimental validation. Uses an email address and
-  an automatically managed client credential.
+  prioritize candidates for experimental validation. Uses a verified GRADE login.
 ---
 
 # GRADE API — GPCR Agonist Candidate Ranking
@@ -17,12 +18,8 @@ The model uses two protein sequence encoders and a bidirectional cross-attention
 
 ## First-use Guidance
 
-1. Use an email address already supplied by the user, `GRADE_EMAIL`, or the client's saved email. Let the script handle its private configuration; do not open credential files. If an email is needed, ask exactly:
-
-   > Please enter your email address:
-
-   Add no explanation of purpose or verification status to this question. Pass the supplied address with `--email`. Do not ask for an API key, password, or client token.
-2. The script automatically registers a client on first use and saves its credential in a private user configuration file. Do not print, copy, read, or reset the credential yourself. Do not remove configuration or change email to bypass quotas. A saved invalid credential stops the client; it does not create a replacement automatically.
+1. Use `python skills/grade-cloud/scripts/grade_predict.py whoami` to check for a verified session. When login is needed, run the same script with `login --no-browser` and show the user the verification URL and device code. Ask the user to open the site, verify their email there, and approve the device.
+2. Keep the login command running until it completes. The script manages the private session and shares it with the GRADE package. Use the script to manage the session and keep credentials out of chat, logs, and output.
 3. Use `GRADE-paper` by default. It is the frozen paper model and the only supported choice. `GRADE-base` and `GRADE-medium` are future versions, not available selections or aliases. If the user explicitly requests one, explain its unavailability and ask for an available choice; do not silently substitute paper.
 
 ## Prerequisites
@@ -33,19 +30,20 @@ The script is `skills/grade-cloud/scripts/grade_predict.py` in this repository. 
 pip install requests
 ```
 
-The script and the package Cloud client reuse the same user configuration for the same service. Email precedence is `--email`, `GRADE_EMAIL`, saved email, then terminal input. Surrounding whitespace is stripped and the address is lowercased; dots and `+tags` are preserved. In a non-interactive session, missing email fails immediately without waiting for input. Empty input, EOF or Ctrl-C stops submission.
+The script and package share a verified session for the same service. Sessions last up to 14 days. Use `logout` to revoke the CLI session. Non-interactive predictions require an existing session.
 
 ## Quick Start
 
 ```bash
+python skills/grade-cloud/scripts/grade_predict.py login
+
 python skills/grade-cloud/scripts/grade_predict.py \
-  --email user@example.org \
   --target-seq MRYRLAWLLHPALPSTFRSVLGARLPPPERLCGFQKKTYSKMNNPAI \
   --peptides candidates.fasta \
   --output results.csv
 ```
 
-Omit `--email` to use the environment, saved email or interactive prompt. The script checks prediction inputs and output destination before prompting or making network requests.
+The script checks prediction inputs and the output destination before calling Cloud.
 
 For top-k JSON output:
 
@@ -64,13 +62,13 @@ Query quota without prediction inputs:
 python skills/grade-cloud/scripts/grade_predict.py --usage
 ```
 
-On a fresh installation, `--usage` needs an email and automatically registers a client. Registration and quota queries do not consume prediction quota.
+Quota queries require a verified session and do not consume prediction quota.
 
 ## Script Parameters
 
 | Parameter | Required | Description |
 |---|---|---|
-| `--email` | No | Email address; otherwise use environment, saved email or terminal input |
+| `--email` | No | Expected verified account email |
 | `--usage` | No | Show remaining quota; cannot combine with prediction/output arguments |
 | `--model` | No | Default and only supported value: `GRADE-paper` |
 | `--target-seq` | For prediction | Target GPCR amino acid sequence |
@@ -79,7 +77,7 @@ On a fresh installation, `--usage` needs an email and automatically registers a 
 | `--output-format` | No | `csv`, `tsv` or `json`; otherwise inferred from output extension |
 | `--top-k` | No | Retain the highest K results; positive integer |
 
-`--api-key` is retired and reports an upgrade error. `GRADE_API_KEY` is not used. Existing positional `call_api(api_key, ...)` Python calls are replaced by `call_api(target_seq, peptides, *, email, client_token, model='GRADE-paper')`; prefer the CLI so it manages credentials automatically.
+Use `login` for access if you previously used an API key or automatic client registration.
 
 ## Inputs and Outputs
 
@@ -97,17 +95,15 @@ Base URL: `https://devxia--grade-web.modal.run`
 
 | Route | Request | Result |
 |---|---|---|
-| `POST /client/register` | JSON `email` | Automatically issued `client_token`, `client_id`, normalized `email` |
-| `POST /usage` | Bearer credential; JSON `email` | `limit`, `remaining`, `reset_at` |
-| `POST /predict` | Bearer credential; JSON shown below | Descending predictions |
+| `POST /usage` | Bearer access token and JSON `{}` | `limit`, `remaining`, `reset_at` |
+| `POST /predict` | Bearer access token and prediction JSON | Descending predictions |
 
-Only the client handles the returned credential. It sends it in `Authorization: Bearer <client_token>`; never include a real credential in examples, chat, logs or result files. Registration and other requests are not automatically retried or redirected.
+The script sends `Authorization: Bearer <access_token>`. Cloud gets the verified email from the session.
 
 Prediction request:
 
 ```json
 {
-  "email": "user@example.org",
   "model": "GRADE-paper",
   "target_seq": "MRYRLAWLLH...",
   "peptides": [
@@ -135,8 +131,8 @@ The service accepts up to 50 peptides per request. Each email and each client in
 
 | Status | Action |
 |---|---|
-| `401` | Report invalid client credential; do not reset configuration or register a new identity automatically |
-| `422` | Report the API message; check email, model, sequence, duplicate names and request size |
+| `401` | The session is missing, expired or revoked. Run `login` again. |
+| `422` | Report the API message and check the model, sequences, duplicate names and request size. |
 | `429` | For daily quota use the reset time; for short-term throttling use `Retry-After` |
 | `500`/`503` | Report the error; an unknown outcome may have consumed quota, so check `--usage` before retrying |
 

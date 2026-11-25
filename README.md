@@ -13,30 +13,32 @@ GRADE ranks candidate peptides for predicted agonist activity at a target GPCR. 
 
 ## Install
 
-Use Python 3.11 or newer. Create a virtual environment and install from source:
+Use Python 3.11 or newer. Create a virtual environment and install GRADE from PyPI:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install "grade-client>=1.3.0"
+```
+
+<details>
+<summary>Install from source</summary>
 
 ```bash
 git clone https://github.com/devxia/GRADE.git
 cd GRADE
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
-```
-
-<details>
-<summary>Install the Python package from PyPI</summary>
-
-In an activated virtual environment, install [grade-client](https://pypi.org/project/grade-client/):
-
-```bash
-python -m pip install grade-client
 ```
 
 </details>
 
 ## Quick Start
 
-An email address is required to use the prediction service.
+You can rank candidates in your browser at [grade.devxia.cc](https://grade.devxia.cc/).
+
+To use the CLI, run `grade login` and open the page shown in your terminal. Follow the link sent to your email, then enter the terminal code in the browser to approve the device. The CLI session lasts up to 14 days. Use `grade whoami` to check it and `grade logout` to end it.
 
 **1. Prepare your candidates**
 
@@ -72,7 +74,7 @@ rank,target,peptide_name,src,sequence,score
 
 Scores range from 0 to 1; higher scores indicate greater predicted agonist potential. Functional assays are needed to establish agonist activity. See [Inputs and result files](#inputs-and-result-files) for field definitions and interpretation.
 
-Replace the example peptides with your candidates. For non-interactive use, add `--email user@example.org`. Run `grade --help` for all command options.
+Replace the example peptides with your candidates. For non-interactive use, sign in first with `grade login` on the machine that will run the prediction. Run `grade --help` for all command options.
 
 ### Use your own target
 
@@ -157,7 +159,7 @@ grade --usage
 | Effective available quota | Smaller of the two remaining balances |
 | Reset time | UTC midnight; 08:00 Beijing time |
 
-The package and Skill share the same quota. Repeated predictions count again, and `--top-k` does not reduce the number submitted. Users sharing a public IP do not share a daily quota.
+Website, CLI and Skill predictions count toward the same daily quota for a verified email. The CLI and Skill also share a client quota when they use the same login session. Repeated predictions count again, and `--top-k` does not reduce the number submitted. Users sharing a public IP do not share a daily quota.
 
 If the service returns 429, follow the daily reset time or `Retry-After` value. A timed-out request may have consumed quota; check `grade --usage` before retrying.
 
@@ -179,12 +181,13 @@ Example request:
 
 > Use GRADE to rank the peptides in candidates.fasta against my GPCR target and save the results to scores.csv.
 
-Provide an email address, the target sequence and candidate peptides. The Skill uses GRADE-paper and the same prediction service as the package.
+Provide the target sequence and candidate peptides. The Skill uses GRADE-paper and shares the verified login with the package.
 
 The bundled script can also run directly from the cloned repository without installing `grade-client`:
 
 ```bash
 python -m pip install requests
+python skills/grade-cloud/scripts/grade_predict.py login
 python skills/grade-cloud/scripts/grade_predict.py --help
 ```
 
@@ -197,7 +200,7 @@ GRADE uses Cloud resources unless you specify a local model directory with `--mo
 Install the local inference dependencies:
 
 ```bash
-python -m pip install "grade-client[local]"
+python -m pip install "grade-client[local]>=1.3.0"
 ```
 
 For a source installation, run `python -m pip install ".[local]"` from the cloned `GRADE` directory instead.
@@ -284,18 +287,16 @@ The package and Skill handle these requests for most users. Direct integrations 
 
 | Endpoint | Request | Response |
 |---|---|---|
-| `POST /client/register` | JSON `email` | `client_token`, `client_id`, normalized `email` |
-| `POST /usage` | Bearer credential and JSON `email` | `limit`, `remaining`, `reset_at` |
-| `POST /predict` | Bearer credential and prediction JSON | Ranked predictions |
+| `POST /usage` | Bearer access token and JSON `{}` | `limit`, `remaining`, `reset_at` |
+| `POST /predict` | Bearer access token and prediction JSON | Ranked predictions |
 
-Register once with an email, retain the issued credential privately, and send it in subsequent requests as `Authorization: Bearer <client_token>`. Do not put real credentials in published scripts or logs.
+The [GRADE sign-in site](https://grade.devxia.cc/) issues access tokens after email verification. Send the token in `Authorization: Bearer <access_token>`. Cloud reads the verified email and client identity from the session.
 
 <details>
 <summary>Example prediction request for the bundled CCR5_HUMAN sequence</summary>
 
 ```json
 {
-  "email": "user@example.org",
   "model": "GRADE-paper",
   "target_seq": "MDYQVSSPIYDINYYTSEPCQKINVKQIAARLLPPLYSLVFIFGFVGNMLVILILINCKRLKSMTDIYLLNLAISDLFFLLTVPFWAHYAAAQWDFGNTMCQLLTGLYFIGFFSGIFFIILLTIDRYLAVVHAVFALKARTVTFGVVTSVITWVVAVFASLPGIIFTRSQKEGLHYTCSSHFPYSQYQFWKNFQTLKIVILGLVLPLLVMVICYSGILKTLLRCRNEKKRHRAVRLIFTIMIVYFLFWAPYNIVLLLNTFQEFFGLNNCSSSNRLDQAMQVTETLGMTHCCINPIIYAFVGEKFRNYLLVFFQKHIAKRFCKCCSIFQQEAPERASSVYTRSTGEQEISVGL",
   "peptides": [
@@ -318,8 +319,8 @@ Successful responses include `X-GRADE-Model`, `X-GRADE-Quota-Limit`, `X-GRADE-Qu
 
 | Status | Meaning |
 |---|---|
-| 401 | Missing or invalid client credential |
-| 422 | Invalid email, target, candidate list, request size, model or format |
+| 401 | Missing, invalid, expired or revoked access token |
+| 422 | Invalid target, candidate list, request size, model or format |
 | 429 | Daily quota or short-term frequency limit; follow reset/`Retry-After` |
 | 500/503 | Server failure or uncertain outcome; check usage before retrying |
 

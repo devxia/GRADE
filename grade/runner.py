@@ -18,19 +18,15 @@ def run_cloud(args):
             if not candidates:
                 raise ValueError("No peptides found in the provided candidate file")
             cloud.check_output_path(Path(args.output_csv))
-        path = cloud.config_path()
-        saved = cloud.load_config(path)
-        token = saved.get("client_token", "")
-        email = cloud.resolve_email(args.email, saved.get("email"))
-        identity = cloud.client_identity(email, path)
-        token = identity["client_token"]
+        identity = cloud.client_identity(args.email, cloud.config_path())
+        token = identity["access_token"]
         if args.usage:
-            data = cloud.query_usage(email, token)
+            data = cloud.query_usage(token)
             print(cloud._redact(f"Daily quota remaining: {data['remaining']}/{data['limit']}. Resets at {data['reset_at']}.", token))
             return
         print(f"Using Cloud inference: {args.model}", file=sys.stderr)
         peptides = [{"name": name, "sequence": sequence} for name, sequence in candidates.items()]
-        results = cloud.call_api(target_seq, peptides, email=email, client_token=token, model=args.model)
+        results = cloud.call_api(target_seq, peptides, client_token=token, model=args.model)
         # Check correspondence before publishing a table labelled with this input.
         returned = {row["peptide_name"]: row["sequence"] for row in results}
         if len(returned) != len(results) or returned != candidates:
@@ -49,6 +45,8 @@ def run_cloud(args):
         print(f"Saved {len(rows)} results to {args.output_csv}", file=sys.stderr)
     except (ValueError, KeyError, OSError, UnicodeError) as error:
         cloud._abort(cloud._redact(str(error), token))
+    except KeyboardInterrupt:
+        cloud._abort("GRADE login was cancelled.")
 
 
 def run_local(args, local_inference):
@@ -66,7 +64,9 @@ def run_local(args, local_inference):
 
 
 def run(args, local_inference):
-    if args.mode == "local":
+    if getattr(args, "auth_command", None):
+        cloud.run_auth_command(args)
+    elif args.mode == "local":
         run_local(args, local_inference)
     else:
         run_cloud(args)

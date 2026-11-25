@@ -34,7 +34,7 @@ class ModelRegistryTests(unittest.TestCase):
                 get_model_spec(value)
 
     def test_package_version(self):
-        self.assertEqual(grade.__version__, "1.2.0")
+        self.assertEqual(grade.__version__, "1.3.0")
 
 
 if __name__ == "__main__":

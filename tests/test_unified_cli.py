@@ -38,7 +38,7 @@ class UnifiedTests(unittest.TestCase):
         self.stderr, self.stdout = io.StringIO(), io.StringIO()
         self.stack.enter_context(contextlib.redirect_stderr(self.stderr))
         self.stack.enter_context(contextlib.redirect_stdout(self.stdout))
-        self.identity = self.stack.enter_context(patch.object(cloud, "client_identity", return_value={"client_token": TOKEN}))
+        self.identity = self.stack.enter_context(patch.object(cloud, "client_identity", return_value={"access_token": TOKEN}))
         self.api = self.stack.enter_context(patch.object(cloud, "call_api", return_value=[
             {"peptide_name": "low", "sequence": "EFG", "score": 0.1},
             {"peptide_name": "high", "sequence": "KLM", "score": 0.9},
@@ -59,7 +59,7 @@ class UnifiedTests(unittest.TestCase):
         self.run_cloud()
         self.api.assert_called_once_with("ACD", [
             {"name": "low", "sequence": "EFG"}, {"name": "high", "sequence": "KLM"},
-        ], email="user@example.org", client_token=TOKEN, model="GRADE-paper")
+        ], client_token=TOKEN, model="GRADE-paper")
         rows = list(csv.DictReader(io.StringIO(self.output.read_text())))
         self.assertEqual(list(rows[0]), ["rank", "target", "peptide_name", "src", "sequence", "score"])
         self.assertEqual([row["peptide_name"] for row in rows], ["high", "low"])
@@ -125,7 +125,7 @@ class UnifiedTests(unittest.TestCase):
         args = parse_args(["--usage", "--email", "user@example.org"])
         with patch.object(cloud, "query_usage", return_value={"remaining": 12, "limit": 50, "reset_at": "tomorrow"}) as usage:
             runner.run(args, self.local)
-        usage.assert_called_once_with("user@example.org", TOKEN)
+        usage.assert_called_once_with(TOKEN)
         self.api.assert_not_called()
         self.local.assert_not_called()
         self.assertIn("12/50", self.stdout.getvalue())
@@ -193,7 +193,7 @@ class UnifiedTests(unittest.TestCase):
         for command in (["-c", "import sys; import grade.runner, grade.inputs; assert not any(m in sys.modules for m in ('torch','transformers','requests'))"], ["-m", "grade", "--help"], ["-m", "grade.inference", "--help"], [str(ROOT / "run_inference.py"), "--help"], ["-m", "grade", "--version"]):
             result = subprocess.run([sys.executable, "-S", "-B", *command], cwd=ROOT, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "grade-client 1.2.0")
+        self.assertEqual(result.stdout.strip(), "grade-client 1.3.0")
 
     def test_generated_skill_is_synchronized_and_independent(self):
         check_sync(ROOT)

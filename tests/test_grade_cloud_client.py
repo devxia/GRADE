@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import typing
 import unittest
@@ -24,8 +25,8 @@ with mock.patch.dict(sys.modules, {"requests": None}):
 
 MODEL = "GRADE-paper"
 EMAIL = "user@example.org"
-TOKEN = "test-only-client-credential-" + "x" * 20
-CID = "a" * 32
+TOKEN = "A" * 43
+REFRESH = "R" * 43
 RESULTS = [
     {"peptide_name": "low", "sequence": "ACD", "score": 0.1},
     {"peptide_name": "high", "sequence": "KLM", "score": 0.9},
@@ -59,7 +60,7 @@ class FakeHTTP(types.ModuleType):
         super().__init__("requests")
         self.calls = []
         self.response = FakeResponse({"model": MODEL, "results": copy.deepcopy(RESULTS)})
-        self.registration = FakeResponse({"client_token": TOKEN, "client_id": CID, "email": EMAIL})
+        self.oauth = {}
         self.usage = FakeResponse({"limit": 50, "remaining": 48, "reset_at": "2026-09-22T00:00:00Z"})
         self.failure = None
 
@@ -67,8 +68,8 @@ class FakeHTTP(types.ModuleType):
         self.calls.append((url, copy.deepcopy(kwargs)))
         if self.failure:
             raise self.failure
-        if url.endswith("/client/register"):
-            return self.registration
+        if "/oauth/" in url:
+            return self.oauth[url.split("/oauth/")[1]]
         if url.endswith("/usage"):
             return self.usage
         return self.response
@@ -91,7 +92,9 @@ class ClientTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(client, "config_path", return_value=self.config))
         for name in ("stdin", "stdout", "stderr"):
             self.stack.enter_context(mock.patch.object(sys, name, getattr(self, name)))
-        self.saved = {"version": 1, "api_base": client.API_BASE, "email": EMAIL, "client_id": CID, "client_token": TOKEN}
+        self.saved = {"version": 2, "api_base": client.API_BASE, "auth_base": client.AUTH_BASE,
+                      "email": EMAIL, "access_token": TOKEN, "refresh_token": REFRESH,
+                      "access_end": int(time.time()) + 120, "session_end": int(time.time()) + 1200}
         client.save_config(self.config, self.saved)
 
     def run_main(self, *extra, usage=False):
@@ -102,7 +105,7 @@ class ClientTests(unittest.TestCase):
             client.main()
 
     def call(self, **changes):
-        values = {"email": EMAIL, "client_token": TOKEN, "model": MODEL, **changes}
+        values = {"client_token": TOKEN, "model": MODEL, **changes}
         return client.call_api("MRY", [{"name": "p", "sequence": "ACD"}], **values)
 
     def assert_private(self):
@@ -110,54 +113,42 @@ class ClientTests(unittest.TestCase):
         if self.output.exists():
             self.assertNotIn(TOKEN, self.output.read_text())
 
-    def test_email_precedence_and_exact_prompt(self):
-        os.environ["GRADE_EMAIL"] = "env@example.org"
-        self.assertEqual(client.resolve_email(" ARG@EXAMPLE.ORG ", EMAIL), "arg@example.org")
-        self.assertEqual(client.resolve_email(None, EMAIL), "env@example.org")
-        os.environ["GRADE_EMAIL"] = ""
-        self.assertEqual(client.resolve_email(None, EMAIL), EMAIL)
-        with mock.patch.object(sys, "stdin", Terminal(True, "Prompt@Example.org\n")):
-            self.stderr.tty = True
-            self.assertEqual(client.resolve_email(None), "prompt@example.org")
-        self.assertEqual(self.stderr.getvalue(), "Please enter your email address:\n")
-        self.assertEqual(self.stdout.getvalue(), "")
+    def run_auth(self, *args):
+        with mock.patch.object(sys, "argv", [str(CLIENT_PATH), *args]):
+            client.main()
 
-    def test_first_use_registers_once_and_reuses_credential_across_email_and_cwd(self):
+    def test_device_login_persists_verified_account_and_rejects_email_override(self):
         self.config.unlink()
-        self.run_main("--email", EMAIL)
-        self.assertEqual([url.rsplit("/", 1)[-1] for url, _ in self.http.calls], ["register", "predict"])
-        self.assertEqual(self.http.calls[0][1]["headers"], {})
-        self.assertEqual(client.load_config(self.config)["client_token"], TOKEN)
-        self.run_main("--email", "another@example.org")
+        self.http.oauth = {
+            "device/code": FakeResponse({"verification_uri": client.AUTH_BASE + "/device", "user_code": "ABCD-EFGH",
+                                         "device_code": "D" * 43, "interval": 5, "expires_in": 600}),
+            "token": FakeResponse({"access_token": TOKEN, "refresh_token": REFRESH, "token_type": "Bearer",
+                                   "expires_in": 1800, "session_expires_in": 1209600, "email": EMAIL}),
+        }
+        with mock.patch.object(client.time, "sleep"):
+            self.run_auth("login", "--no-browser")
+        self.assertIn("ABCD-EFGH", self.stderr.getvalue())
+        self.assertEqual(client.load_config(self.config)["email"], EMAIL)
+        self.run_main()
         self.assertEqual(len(self.http.calls), 3)
         request = self.http.calls[-1][1]
-        self.assertEqual(request["json"]["email"], "another@example.org")
+        self.assertNotIn("email", request["json"])
         self.assertEqual(request["headers"], {"Authorization": "Bearer " + TOKEN})
         self.assertFalse(request["allow_redirects"])
-        self.assertEqual(client.load_config(self.config)["client_id"], CID)
+        with self.assertRaises(SystemExit):
+            self.run_main("--email", "another@example.org")
+        self.assertEqual(len(self.http.calls), 3)
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
         self.assert_private()
 
-    def test_noninteractive_missing_email_and_invalid_email_never_register(self):
-        self.config.unlink()
-        for args, message in (((), "Email address required"), (("--email", "bad"), "Please enter a valid email address")):
+    def test_noninteractive_legacy_config_requires_verified_login(self):
+        client.save_config(self.config, {"version": 1, "api_base": client.API_BASE, "email": EMAIL})
+        for args, message in (((), "No active GRADE login"), (("--email", "bad"), "Please enter a valid email address")):
             with self.subTest(args=args), self.assertRaises(SystemExit):
                 self.run_main(*args)
             self.assertIn(message, self.stderr.getvalue())
             self.assertEqual(self.http.calls, [])
-        self.assertFalse(self.config.exists())
-
-    def test_empty_eof_and_interrupted_input_stop(self):
-        self.stderr.tty = True
-        for value in ("", " \n"):
-            with mock.patch.object(sys, "stdin", Terminal(True, value)), self.assertRaises(ValueError):
-                client.resolve_email(None)
-        stream = Terminal(True)
-        with mock.patch.object(stream, "readline", side_effect=KeyboardInterrupt), mock.patch.object(sys, "stdin", stream):
-            with self.assertRaises(ValueError):
-                client.resolve_email(None)
-        self.assertEqual(self.http.calls, [])
 
     def test_invalid_local_inputs_precede_prompt_and_registration(self):
         self.config.unlink()
@@ -165,7 +156,7 @@ class ClientTests(unittest.TestCase):
         for args in (("--target-seq", " "), ("--peptides", str(self.work / "missing.fa")), ("--output", str(self.work / "missing/out.csv")), ("--output", str(self.work))):
             with self.subTest(args=args), self.assertRaises(SystemExit):
                 self.run_main(*args)
-        self.assertNotIn(client.EMAIL_PROMPT, self.stderr.getvalue())
+        self.assertNotIn("enter code", self.stderr.getvalue())
         self.assertEqual(self.http.calls, [])
         self.assertFalse(self.config.exists())
 
@@ -192,14 +183,15 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.http.calls, [])
         self.assert_private()
 
-    def test_invalid_registration_is_not_saved(self):
-        self.config.unlink()
-        for data in (None, [], {}, {"client_token": TOKEN}, {"client_token": "short", "client_id": CID}):
-            self.http.registration = FakeResponse(data)
+    def test_invalid_refresh_is_not_saved(self):
+        previous = {**self.saved, "access_end": 0}
+        client.save_config(self.config, previous)
+        for data in (None, [], {}, {"access_token": TOKEN}, {"access_token": "short"}):
+            self.http.oauth["token"] = FakeResponse(data)
             with self.subTest(data=data), self.assertRaises(SystemExit):
                 self.run_main("--email", EMAIL)
-            self.assertFalse(self.config.exists())
-        self.assertTrue(all(url.endswith("/register") for url, _ in self.http.calls))
+            self.assertEqual(client.load_config(self.config), previous)
+        self.assertTrue(all(url.endswith("/oauth/token") for url, _ in self.http.calls))
         self.assert_private()
 
     def test_usage_without_prediction_inputs(self):
@@ -238,7 +230,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.call(), RESULTS)
         self.run_main()
         payload = self.http.calls[-1][1]["json"]
-        self.assertEqual(payload, {"email": EMAIL, "model": MODEL, "target_seq": "MRY", "peptides": [
+        self.assertEqual(payload, {"model": MODEL, "target_seq": "MRY", "peptides": [
             {"name": "low", "sequence": "ACD"}, {"name": "high", "sequence": "KLM"},
         ]})
         self.assertNotIn("api_key", payload)
@@ -270,7 +262,7 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.run_main("--output", str(self.output))
             self.assertFalse(self.output.exists())
-            self.assertEqual(client.load_config(self.config)["client_token"], TOKEN)
+            self.assertEqual(client.load_config(self.config)["access_token"], TOKEN)
         self.assertTrue(all(url.endswith("/predict") for url, _ in self.http.calls))
         self.assert_private()
 
@@ -359,37 +351,34 @@ class ClientTests(unittest.TestCase):
     def test_help_subprocess_without_requests(self):
         result = subprocess.run([sys.executable, "-I", "-S", "-B", str(CLIENT_PATH), "--help"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for text in ("--email", "GRADE_EMAIL", "--usage", "--model", MODEL):
+        for text in ("--email", "login", "--usage", "--model", MODEL):
             self.assertIn(text, result.stdout)
         self.assertNotIn("--api-key", result.stdout)
         self.assertEqual(result.stderr, "")
 
-    def test_concurrent_first_use_processes_share_one_registration(self):
-        self.config.unlink()
-        registration_log = self.config_root / "registrations.txt"
+    def test_concurrent_processes_share_one_refresh(self):
+        client.save_config(self.config, {**self.saved, "access_end": 0})
+        refresh_log = self.config_root / "refreshes.txt"
         runner = '''
 import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location("client", sys.argv[1])
 c = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(c)
-class Response:
-    def json(self):
-        return {"client_token": "synthetic-credential-" + "x" * 30, "client_id": "b" * 32}
 def post(*args):
     with open(sys.argv[3], "a") as f:
-        f.write("registered\\n")
-    return Response()
-c.post_api = post
+        f.write("refreshed\\n")
+    return 200, {"access_token": "N" * 43, "token_type": "Bearer", "expires_in": 1800, "email": "user@example.org"}
+c._auth_post = post
 c.client_identity("user@example.org", pathlib.Path(sys.argv[2]))
 '''
-        command = [sys.executable, "-I", "-S", "-B", "-c", runner, str(CLIENT_PATH), str(self.config), str(registration_log)]
+        command = [sys.executable, "-I", "-S", "-B", "-c", runner, str(CLIENT_PATH), str(self.config), str(refresh_log)]
         processes = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=self.work) for _ in range(4)]
-        for process in processes:
-            out, err = process.communicate(timeout=15)
+        results = [process.communicate(timeout=15) for process in processes]
+        for process, (out, err) in zip(processes, results):
             self.assertEqual(process.returncode, 0, err)
             self.assertEqual(out, "")
-        self.assertEqual(registration_log.read_text().splitlines(), ["registered"])
-        self.assertEqual(client.load_config(self.config)["client_id"], "b" * 32)
+        self.assertEqual(refresh_log.read_text().splitlines(), ["refreshed"])
+        self.assertEqual(client.load_config(self.config)["access_token"], "N" * 43)
 
 
 if __name__ == "__main__":

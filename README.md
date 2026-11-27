@@ -7,9 +7,19 @@
 
 GRADE ranks candidate peptides for predicted agonist activity at a target GPCR. Supply a GPCR amino acid sequence and a peptide list to receive scores sorted from highest to lowest for experimental prioritization.
 
-[**Install**](#install) · [**Quick Start**](#quick-start) · [Agent Skill](#agent-skill) · [Local inference](#use-a-local-model) · [Cloud API](#cloud-api) · [Citation](#citation)
+[**Web**](#web-prediction) · [**Install**](#install) · [**Quick Start**](#quick-start) · [Agent Skill](#agent-skill) · [Local inference](#use-a-local-model) · [Cloud API](#cloud-api) · [Citation](#citation)
 
 `grade-client` · Python 3.11+ · Model: **GRADE-paper** · [Preprint](https://doi.org/10.65215/LTSpreprints.2026.10.15.000361) · [MIT License](LICENSE)
+
+## Web prediction
+
+No installation needed. Open [grade.devxia.cc](https://grade.devxia.cc/) to rank candidates in your browser:
+
+1. **Sign in with your email.** Open the one-time link sent to your inbox and confirm; the session lasts 14 days.
+2. **Choose a target.** Search 329 human GPCR targets by identifier, gene name or UniProt accession, or paste a custom amino acid sequence.
+3. **Submit candidates.** Paste peptides in FASTA format or one sequence per line (up to 50 per request), then view the ranked results and download them as CSV.
+
+Web predictions use the same GRADE-paper model as the CLI and share the same [daily quota](#cloud-quota) for your verified email. For large batches, non-interactive runs or local inference, install the client below.
 
 ## Install
 
@@ -36,7 +46,7 @@ python -m pip install .
 
 ## Quick Start
 
-You can rank candidates in your browser at [grade.devxia.cc](https://grade.devxia.cc/).
+To rank candidates in your browser without installing anything, see [Web prediction](#web-prediction).
 
 To use the CLI, run `grade login` and open the page shown in your terminal. Follow the link sent to your email, then enter the terminal code in the browser to approve the device. The CLI session lasts up to 14 days. Use `grade whoami` to check it and `grade logout` to end it.
 
